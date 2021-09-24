@@ -36,6 +36,7 @@
  *
  */
 
+//#define PACKET_TRACING
 #include "lwip/opt.h"
 
 #include "lwip/def.h"
@@ -109,13 +110,18 @@ static err_t ethernet_low_level_output(struct netif *netif, struct pbuf *p)
     struct pbuf *q = p;
     esp_netif_t *esp_netif = esp_netif_get_handle_from_netif_impl(netif);
     esp_err_t ret = ESP_FAIL;
+#ifdef PACKET_TRACING
+    printf("'");
+#endif
     if (!esp_netif) {
+        printf("ERROR %s in %s(%d) esp_netif is NULL, ret = %d\n", __FUNCTION__,__FILE__, __LINE__, ERR_IF);
         LWIP_DEBUGF(NETIF_DEBUG, ("corresponding esp-netif is NULL: netif=%p pbuf=%p len=%d\n", netif, p, p->len));
         return ERR_IF;
     }
 
     if (q->next == NULL) {
         ret = esp_netif_transmit(esp_netif, q->payload, q->len);
+	if (ret) { printf("ERROR %s in %s(%d) esp_netif_transmit returned %d\n", __FUNCTION__,__FILE__, __LINE__, ret); }
     } else {
         LWIP_DEBUGF(PBUF_DEBUG, ("low_level_output: pbuf is a list, application may has bug"));
         q = pbuf_alloc(PBUF_RAW_TX, p->tot_len, PBUF_RAM);
@@ -127,14 +133,17 @@ static err_t ethernet_low_level_output(struct netif *netif, struct pbuf *p)
 #endif
             pbuf_copy(q, p);
         } else {
+            printf("ERROR %s in %s(%d) ret = ERR_MEM\n", __FUNCTION__,__FILE__, __LINE__);
             return ERR_MEM;
         }
         ret = esp_netif_transmit(esp_netif, q->payload, q->len);
+	if (ret) { printf("ERROR %s in %s(%d) esp_netif_transmit returned %d\n", __FUNCTION__,__FILE__, __LINE__, ret); }
         /* content in payload has been copied to DMA buffer, it's safe to free pbuf now */
         pbuf_free(q);
     }
     /* Check error */
     if (unlikely(ret != ESP_OK)) {
+	printf("ERROR %s in %s(%d) ret = %d\n", __FUNCTION__,__FILE__, __LINE__, ret);
         return ERR_ABRT;
     } else {
         return ERR_OK;
