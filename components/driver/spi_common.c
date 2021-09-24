@@ -374,24 +374,30 @@ static bool check_iomux_pins_quad(spi_host_device_t host, const spi_bus_config_t
 {
     if (bus_config->sclk_io_num>=0 &&
         bus_config->sclk_io_num != spi_periph_signal[host].spiclk_iomux_pin) {
+	ESP_LOGI(SPI_TAG, "SCLK disqualifies IOMUX, sclk = %d, iomux_sclk = %d", bus_config->sclk_io_num, spi_periph_signal[host].spiclk_iomux_pin);
         return false;
     }
     if (bus_config->quadwp_io_num>=0 &&
         bus_config->quadwp_io_num != spi_periph_signal[host].spiwp_iomux_pin) {
+	ESP_LOGI(SPI_TAG, "QUADWP disqualifies IOMUX, quadwp = %d, iomux_quadwp = %d",bus_config->quadwp_io_num, spi_periph_signal[host].spiwp_iomux_pin);
         return false;
     }
     if (bus_config->quadhd_io_num>=0 &&
         bus_config->quadhd_io_num != spi_periph_signal[host].spihd_iomux_pin) {
+	ESP_LOGI(SPI_TAG, "QUADHD disqualifies IOMUX, quadhd = %d, iomux_quadhd = %d",bus_config->quadhd_io_num, spi_periph_signal[host].spihd_iomux_pin);
         return false;
     }
     if (bus_config->mosi_io_num >= 0 &&
         bus_config->mosi_io_num != spi_periph_signal[host].spid_iomux_pin) {
+	ESP_LOGI(SPI_TAG, "MOSI disqualifies IOMUX, mosi = %d, iomux_mosi = %d", bus_config->mosi_io_num, spi_periph_signal[host].spid_iomux_pin);
         return false;
     }
     if (bus_config->miso_io_num>=0 &&
         bus_config->miso_io_num != spi_periph_signal[host].spiq_iomux_pin) {
+	ESP_LOGI(SPI_TAG, "MISO disqualifies IOMUX, miso = %d, iomux_miso = %d", bus_config->miso_io_num, spi_periph_signal[host].spiq_iomux_pin);
         return false;
     }
+    ESP_LOGI(SPI_TAG, "SPI Qualifies for IOMUX");
     return true;
 }
 
@@ -556,9 +562,9 @@ esp_err_t spicommon_bus_initialize_io(spi_host_device_t host, const spi_bus_conf
     } else {
         temp_flag |= SPICOMMON_BUSFLAG_GPIO_PINS;
     }
-
     uint32_t missing_flag = flags & ~temp_flag;
     missing_flag &= ~SPICOMMON_BUSFLAG_MASTER;//don't check this flag
+    ESP_LOGI(SPI_TAG, "flags = 0x%X, temp_flag = 0x%X, missing_flag = 0x%X", flags, temp_flag, missing_flag);
 
     if (missing_flag != 0) {
     //check pins existence
@@ -585,6 +591,7 @@ esp_err_t spicommon_bus_initialize_io(spi_host_device_t host, const spi_bus_conf
             ESP_LOGE(SPI_TAG, "spi data4 ~ spi data7 are required.");
         }
 #endif
+	ESP_LOGI(SPI_TAG, "missing_flag = 0x%X", missing_flag);
         SPI_CHECK(missing_flag == 0, "not all required capabilities satisfied.", ESP_ERR_INVALID_ARG);
     }
 
