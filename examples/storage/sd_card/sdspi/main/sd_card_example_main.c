@@ -21,10 +21,10 @@ static const char *TAG = "example";
 // Pin mapping
 #if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32S2
 
-#define PIN_NUM_MISO 2
-#define PIN_NUM_MOSI 15
-#define PIN_NUM_CLK  14
-#define PIN_NUM_CS   13
+#define PIN_NUM_MISO 19
+#define PIN_NUM_MOSI 23
+#define PIN_NUM_CLK  18
+#define PIN_NUM_CS   0
 
 #elif CONFIG_IDF_TARGET_ESP32C3
 #define PIN_NUM_MISO 18
@@ -68,6 +68,9 @@ void app_main(void)
     ESP_LOGI(TAG, "Using SPI peripheral");
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    // override to use VSPI
+    host.slot = VSPI_HOST;
+    //host.max_freq_khz = 27000;
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = PIN_NUM_MOSI,
         .miso_io_num = PIN_NUM_MISO,
