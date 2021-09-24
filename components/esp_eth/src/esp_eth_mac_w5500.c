@@ -11,6 +11,11 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//#define PACKET_TRACING
+#define DUMP_REGS_EVERY_N_PACKETS (100000)
+
+#define W5500_BUFFER_SIZE_K (16)
+#define W5500_BUFFER_SIZE (W5500_BUFFER_SIZE_K <<10)
 #include <string.h>
 #include <stdlib.h>
 #include <sys/cdefs.h>
@@ -32,6 +37,10 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "w5500.mac";
+static uint32_t packetnum = 0;
+
+esp_err_t dump_w5500_regs(esp_eth_mac_t *mac, bool details_if_closed);
+esp_err_t dump_w5500_socket_regs(esp_eth_mac_t *mac, int s, bool details_if_closed);
 
 #define W5500_SPI_LOCK_TIMEOUT_MS (50)
 #define W5500_TX_MEM_SIZE (0x4000)
@@ -209,6 +218,7 @@ static esp_err_t w5500_reset(emac_w5500_t *emac)
     esp_err_t ret = ESP_OK;
     /* software reset */
     uint8_t mr = W5500_MR_RST; // Set RST bit (auto clear)
+    printf("w5500_reset() ------------------------------------------------------->\n");
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_MR, &mr, sizeof(mr)), err, TAG, "write MR failed");
     uint32_t to = 0;
     for (to = 0; to < emac->sw_reset_timeout_ms / 10; to++) {
@@ -219,7 +229,7 @@ static esp_err_t w5500_reset(emac_w5500_t *emac)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     ESP_GOTO_ON_FALSE(to < emac->sw_reset_timeout_ms / 10, ESP_ERR_TIMEOUT, err, TAG, "reset timeout");
-
+    dump_w5500_regs(&(emac->parent), true);
 err:
     return ret;
 }
@@ -239,8 +249,9 @@ err:
 static esp_err_t w5500_setup_default(emac_w5500_t *emac)
 {
     esp_err_t ret = ESP_OK;
-    uint8_t reg_value = 16;
+    uint8_t reg_value = W5500_BUFFER_SIZE_K;
 
+    printf("w5500_setup_default() ------------------------------------------------------->\n");
     // Only SOCK0 can be used as MAC RAW mode, so we give the whole buffer (16KB TX and 16KB RX) to SOCK0
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_RXBUF_SIZE(0), &reg_value, sizeof(reg_value)), err, TAG, "set rx buffer size failed");
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_TXBUF_SIZE(0), &reg_value, sizeof(reg_value)), err, TAG, "set tx buffer size failed");
@@ -265,6 +276,7 @@ static esp_err_t w5500_setup_default(emac_w5500_t *emac)
     /* Set the interrupt re-assert level to maximum (~1.5ms) to lower the chances of missing it */
     uint16_t int_level = __builtin_bswap16(0xFFFF);
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_INTLEVEL, &int_level, sizeof(int_level)), err, TAG, "write INTLEVEL failed");
+    dump_w5500_regs(&(emac->parent),true);
 
 err:
     return ret;
@@ -275,6 +287,7 @@ static esp_err_t emac_w5500_start(esp_eth_mac_t *mac)
     esp_err_t ret = ESP_OK;
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     uint8_t reg_value = 0;
+    printf("emac_w5500_start() ------------------------------------------------------->\n");
     /* open SOCK0 */
     ESP_GOTO_ON_ERROR(w5500_send_command(emac, W5500_SCR_OPEN, 100), err, TAG, "issue OPEN command failed");
     /* enable interrupt for SOCK0 */
@@ -290,6 +303,7 @@ static esp_err_t emac_w5500_stop(esp_eth_mac_t *mac)
     esp_err_t ret = ESP_OK;
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     uint8_t reg_value = 0;
+    printf("emac_w5500_stop() ------------------------------------------------------->\n");
     /* disable interrupt */
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SIMR, &reg_value, sizeof(reg_value)), err, TAG, "write SIMR failed");
     /* close SOCK0 */
@@ -369,6 +383,7 @@ static esp_err_t emac_w5500_write_phy_reg(esp_eth_mac_t *mac, uint32_t phy_addr,
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     // PHY register and MAC registers are mixed together in W5500
     // The only PHY register is PHYCFGR
+    printf("emac_w5500_write_phy_reg() ------------------------------------------------------->\n");
     ESP_GOTO_ON_FALSE(phy_reg == W5500_REG_PHYCFGR, ESP_FAIL, err, TAG, "wrong PHY register");
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_PHYCFGR, &reg_value, sizeof(uint8_t)), err, TAG, "write PHY register failed");
 
@@ -397,6 +412,8 @@ static esp_err_t emac_w5500_set_addr(esp_eth_mac_t *mac, uint8_t *addr)
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     memcpy(emac->addr, addr, 6);
     ESP_GOTO_ON_ERROR(w5500_set_mac_addr(emac), err, TAG, "set mac address failed");
+    printf("emac_w5500_set_addr() ------------------------------------------------------->\n");
+    dump_w5500_regs(&(emac->parent), false);
 
 err:
     return ret;
@@ -517,6 +534,9 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     uint16_t offset = 0;
 
+#ifdef PACKET_TRACING
+    printf(",");
+#endif
     // check if there're free memory to store this packet
     uint16_t free_size = 0;
     ESP_GOTO_ON_ERROR(w5500_get_tx_free_size(emac, &free_size), err, TAG, "get free size failed");
@@ -536,9 +556,13 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     // pooling the TX done event
     int retry = 0;
     uint8_t status = 0;
-    while (!(status & W5500_SIR_SEND)) {
+    free_size = 0;
+    while (!((status & W5500_SIR_SEND)) && (free_size < W5500_BUFFER_SIZE) ) {
         ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_IR(0), &status, sizeof(status)), err, TAG, "read SOCK0 IR failed");
+        ESP_GOTO_ON_ERROR(w5500_get_tx_free_size(emac, &free_size), err, TAG, "get free size failed");
         if ((retry++ > 3 && !is_w5500_sane_for_rxtx(emac)) || retry > 10) {
+            printf("%s in %s(%d) ret is %d, retry is %d, w5500 is %s, free_size is %d\n", __FUNCTION__, __FILE__, __LINE__, ESP_FAIL, retry, (is_w5500_sane_for_rxtx(emac)?"sane":"insane"), (uint32_t)free_size);
+            dump_w5500_regs(mac, false);
             return ESP_FAIL;
         }
     }
@@ -546,7 +570,15 @@ static esp_err_t emac_w5500_transmit(esp_eth_mac_t *mac, uint8_t *buf, uint32_t 
     status  = W5500_SIR_SEND;
     ESP_GOTO_ON_ERROR(w5500_write(emac, W5500_REG_SOCK_IR(0), &status, sizeof(status)), err, TAG, "write SOCK0 IR failed");
 
+    packetnum++;
+    if ((packetnum % DUMP_REGS_EVERY_N_PACKETS) == 0) {
+        dump_w5500_regs(mac, false);
+    }
+
 err:
+    if (ret) {
+	   printf("%s in %s(%d) ret is %d\n", __FUNCTION__, __FILE__, __LINE__, ret);
+    }
     return ret;
 }
 
@@ -591,6 +623,7 @@ static esp_err_t emac_w5500_init(esp_eth_mac_t *mac)
     esp_err_t ret = ESP_OK;
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     esp_eth_mediator_t *eth = emac->eth;
+    printf("emac_w5500_init() ------------------------------------------------------->\n");
     esp_rom_gpio_pad_select_gpio(emac->int_gpio_num);
     gpio_set_direction(emac->int_gpio_num, GPIO_MODE_INPUT);
     gpio_set_pull_mode(emac->int_gpio_num, GPIO_PULLUP_ONLY);
@@ -616,6 +649,7 @@ static esp_err_t emac_w5500_deinit(esp_eth_mac_t *mac)
 {
     emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
     esp_eth_mediator_t *eth = emac->eth;
+    printf("emac_w5500_deinit() ------------------------------------------------------->\n");
     mac->stop(mac);
     gpio_isr_handler_remove(emac->int_gpio_num);
     gpio_reset_pin(emac->int_gpio_num);
@@ -686,5 +720,220 @@ err:
         }
         free(emac);
     }
+    return ret;
+}
+
+esp_err_t dump_w5500_regs(esp_eth_mac_t *mac, bool details_if_closed)
+{
+    esp_err_t ret = ESP_OK;
+    emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
+    uint16_t u16, u16bs;
+    uint8_t  u8;
+    int i;
+
+    ESP_LOGI(TAG,"W5500 Registers:\n");
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_MR, &u8, sizeof(u8)), err, TAG, "read MR failed");
+    printf("MR = 0x%2.2X\n", u8);
+
+    printf("Gateway: ");
+    for (i=1; i < 5; i++) {
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read GAR failed");
+        printf("%d", u8);
+        if (i < 4) { printf(".");}
+    }
+    printf("\n");
+
+    printf("Subnet Mask: ");
+    for (i=5; i < 9; i++) {
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read SUBR failed");
+        printf("%d", u8);
+        if (i < 8) { printf(".");}
+    }
+    printf("\n");
+
+    printf("Source MAC: ");
+    for (i=9; i < 0x0f; i++) {
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read SHAR failed");
+        printf("%2.2X", u8);
+        if (i < 0x0e) { printf(":");}
+    }
+    printf("\n");
+
+    printf("Source IP: ");
+    for (i=0x0f; i < 0x13; i++) {
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read SIPR failed");
+        printf("%d", u8);
+        if (i < 0x12) { printf(".");}
+    }
+    printf("\n");
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_INTLEVEL, &u16, sizeof(u16)), err, TAG, "read INTLEVEL failed");
+    u16bs = __builtin_bswap16(u16);
+    printf("INTLEVEL timer 0x%4.4X\n", u16bs);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_IR, &u8, sizeof(u8)), err, TAG, "read IR failed");
+    printf("IR   = 0x%2.2X\n", u8);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_IMR, &u8, sizeof(u8)), err, TAG, "read IMR failed");
+    printf("IMR  = 0x%2.2X\n", u8);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SIR, &u8, sizeof(u8)), err, TAG, "read SIR failed");
+    printf("SIR  = 0x%2.2X\n", u8);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SIMR, &u8, sizeof(u8)), err, TAG, "read SIMR failed");
+    printf("SIMR = 0x%2.2X\n", u8);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_RTR, &u16, sizeof(u16)), err, TAG, "read RTR failed");
+    u16bs = __builtin_bswap16(u16);
+    printf("RTR  = 0x%4.4X\n", u16bs);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_RCR, &u8, sizeof(u8)), err, TAG, "read RCR failed");
+    printf("RCR  = 0x%2.2X\n", u8);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x001C, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read PTIMER failed");
+    printf("PTIMER = 0x%2.2X\n", u8);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x001D, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read PMAGIC failed");
+    printf("PMAGIC  = 0x%2.2X\n", u8);
+
+    printf("Unreachable IP: ");
+    for (i=0x28; i < 0x2C; i++) {
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_COM_REG), &u8, sizeof(u8)), err, TAG, "read UIPR failed");
+        printf("%d", u8);
+        if (i < 0x2B) { printf(".");}
+    }
+    printf("\n");
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x002C, W5500_BSB_COM_REG), &u16, sizeof(u16)), err, TAG, "read UPORTR failed");
+    u16bs = __builtin_bswap16(u16);
+    printf("Unreachable Port: %d\n", u16bs);
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_PHYCFGR, &u8, sizeof(u8)), err, TAG, "read PHYCFGR failed");
+    printf("PHYCFG = 0x%2.2X, ", (unsigned int)u8);
+    printf("RNST = %d, OPMD = %d, OPMDC = %d, %s %s %s\n",(u8 >> 7),((u8 >> 6) & 1),((u8 >> 3) & 7),
+           ((u8 & 2)?"100Mbps " : "10Mbps "),
+           ((u8 & 4)?"Full Duplex, " : "Half Duplex, "),
+           ((u8 & 1)?"Link up" : "Link down")
+           );
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_VERSIONR, &u8, sizeof(u8)), err, TAG, "read VERSIONR failed");
+    printf("Version = %d\n", u8);
+
+    for ( i = 0; i < 8; i++)
+    {
+        ESP_GOTO_ON_ERROR(dump_w5500_socket_regs(&(emac->parent), i, details_if_closed), err, TAG, "dump W5500 socket regs failed");
+    }
+
+err:
+    return ret;
+}
+
+esp_err_t dump_w5500_socket_regs(esp_eth_mac_t *mac, int s, bool details_if_closed)
+{
+    esp_err_t ret = ESP_OK;
+    emac_w5500_t *emac = __containerof(mac, emac_w5500_t, parent);
+    // uint32_t u32, u32bs;
+    uint16_t u16, u16bs;
+    uint8_t  u8;
+    int i;
+
+    ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_MR(s), &u8, sizeof(u8)), err, TAG, "read Sn_MR failed");
+    /* Only print the details if socket is open, or if "details if closed" is true */
+    if (details_if_closed || (u8 & 0x0F)) {
+        printf("\nSocket Registers for socket %d\n", s);
+        printf("Sn_MR = 0x%2.2X Protocol = ", u8);
+        switch(u8 & 0x0F) {
+            case 0: printf("Closed\n"); break;
+            case 1: printf("TCP\n"); break;
+            case 2: printf("UDP\n"); break;
+            case 4: printf("MACRAW\n"); break;
+            default: printf("ERROR: Undefined\n"); break;
+        }
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_CR(s), &u8, sizeof(u8)), err, TAG, "read Sn_CR failed");
+        printf("Sn_CR = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_IR(s), &u8, sizeof(u8)), err, TAG, "read Sn_IR failed");
+        printf("Sn_IR = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_SR(s), &u8, sizeof(u8)), err, TAG, "read Sn_SR failed");
+        printf("Sn_SR = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x0004, W5500_BSB_SOCK_REG(s)), &u16, sizeof(u16)), err, TAG, "read Sn_PORT failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_SRCPRT: %d\n", u16bs);
+
+        printf("Sn_DSTMAC: ");
+        for (i=6; i < 0x0C; i++) {
+            ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_SOCK_REG(s)), &u8, sizeof(u8)), err, TAG, "read DHAR failed");
+            printf("%2.2X", u8);
+            if (i < 0x0B) { printf(":");}
+        }
+        printf("\n");
+
+        printf("Sn_DSTIP: ");
+        for (i=0x0C; i < 0x10; i++) {
+            ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(i, W5500_BSB_SOCK_REG(s)), &u8, sizeof(u8)), err, TAG, "read SIPR failed");
+            printf("%d", u8);
+            if (i < 0x0F) { printf(".");}
+        }
+        printf("\n");
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x0010, W5500_BSB_SOCK_REG(s)), &u16, sizeof(u16)), err, TAG, "read Sn_DPORT failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_DSTPORT: %d\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x0012, W5500_BSB_SOCK_REG(s)), &u16, sizeof(u16)), err, TAG, "read Sn_MSSR failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_MSSR: 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x0015, W5500_BSB_SOCK_REG(s)), &u8, sizeof(u8)), err, TAG, "read Sn_TOS failed");
+        printf("Sn_TOS = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x0016, W5500_BSB_SOCK_REG(s)), &u8, sizeof(u8)), err, TAG, "read Sn_TTL failed");
+        printf("Sn_TTL = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_RXBUF_SIZE(s), &u8, sizeof(u8)), err, TAG, "read Sn_RXBUF_SIZE failed");
+        printf("Sn_RXBUF_SIZE = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_TXBUF_SIZE(s), &u8, sizeof(u8)), err, TAG, "read Sn_TXBUF_SIZE failed");
+        printf("Sn_TXBUF_SIZE = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_TX_FSR(s), &u16, sizeof(u16)), err, TAG, "read Sn_TX_FSR failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_TX_FSR = 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_TX_RD(s), &u16, sizeof(u16)), err, TAG, "read Sn_TX_RD failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_TX_RD = 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_TX_WR(s), &u16, sizeof(u16)), err, TAG, "read Sn_TX_WR failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_TX_WR = 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_RX_RSR(s), &u16, sizeof(u16)), err, TAG, "read Sn_RX_RSR failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_RX_RSR = 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_RX_RD(s), &u16, sizeof(u16)), err, TAG, "read Sn_RX_RD failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_RX_RD = 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_RX_WR(s), &u16, sizeof(u16)), err, TAG, "read Sn_RX_WR failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_RX_WR = 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_REG_SOCK_IMR(s), &u8, sizeof(u8)), err, TAG, "read Sn_IMR failed");
+        printf("Sn_IMR = 0x%2.2X\n", u8);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x002D, W5500_BSB_SOCK_REG(s)), &u16, sizeof(u16)), err, TAG, "read Sn_FRAG failed");
+        u16bs = __builtin_bswap16(u16);
+        printf("Sn_FRAG: 0x%4.4X\n", u16bs);
+
+        ESP_GOTO_ON_ERROR(w5500_read(emac, W5500_MAKE_MAP(0x002F, W5500_BSB_SOCK_REG(s)), &u8, sizeof(u8)), err, TAG, "read Sn_KPALVTR failed");
+        printf("Sn_KPALVTR = 0x%2.2X\n", u8);
+    }
+
+err:
     return ret;
 }
